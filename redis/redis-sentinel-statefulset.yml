@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sentinel
+  labels:
+    app.bkraujo.io/name: redis
+    app.bkraujo.io/instance: sentinel
+    app.bkraujo.io/part-of: <aplicacao>
+spec:
+  replicas: 3
+  serviceName: redis-sentinel-headless
+  podManagementPolicy: "OrderedReady"
+
+  updateStrategy:
+    type: RollingUpdate
+
+  selector:
+    matchLabels:
+      app.bkraujo.io/name: redis
+      app.bkraujo.io/instance: sentinel
+      app.bkraujo.io/part-of: <aplicacao>
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ ReadWriteOnce ]
+      storageClassName: resize-sc
+      resources:
+        requests:
+          storage: 50Mi
+  template:
+    metadata:
+      labels:
+        app.bkraujo.io/name: redis
+        app.bkraujo.io/instance: sentinel
+        app.bkraujo.io/part-of: <aplicacao>
+    spec:
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      #                              AFFINITY
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cluster.bkraujo.io/name
+                operator: In
+                values:
+                - "producao"
+              - key: node.bkraujo.io/role
+                operator: In
+                values:
+                - "worker"
+              - key: node.bkraujo.io/instance
+                operator: In
+                values:
+                - "c5"
+                - "m5"
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: "kubernetes.io/hostname"
+                labelSelector:
+                  matchExpressions:
+                    - key: "app.bkraujo.io/name"
+                      operator: In
+                      values:
+                      - redis
+                    - key: "app.bkraujo.io/instance"
+                      operator: In
+                      values:
+                      - sentinel
+                    - key: "app.bkraujo.io/part-of"
+                      operator: In
+                      values:
+                      - <aplicacao>
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      #                                VOLUMES
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      volumes:
+      - name: redis-server-config
+        emptyDir: {}
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      #                             Init Containers
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      initContainers:
+      - name: redis-sentinel-initializer
+        image: redis:6.0-alpine
+        command: [ "sh", "-c" ]
+        args:
+          - |
+            echo "Aguardando por REDIS-SERVER"
+            REDIS_PASSWORD=a-very-complex-password-here
+
+            while true; do
+              for idx in 0 1 2; do
+                host="redis-server-$idx.redis-server-headless"
+                ping -c 2 ${host} > /dev/null 2> /dev/null
+
+                if [[ $? -eq 0 ]]; then
+                  MASTER=$(redis-cli --no-auth-warning --raw -h ${host} -a $REDIS_PASSWORD info replication | awk '{print $1}' | grep master_host | cut -d ":" -f2)
+
+                  if [[ "${MASTER}" != "" ]]; then
+                    echo "port 5000" > /etc/redis/sentinel.conf
+
+                    echo "" >> /etc/redis/sentinel.conf
+                    echo "sentinel monitor redis-server ${MASTER} 6379 2" >> /etc/redis/sentinel.conf
+                    echo "sentinel auth-pass redis-server $REDIS_PASSWORD" >> /etc/redis/sentinel.conf
+
+                    echo "" >> /etc/redis/sentinel.conf
+                    echo "sentinel down-after-milliseconds redis-server 5000" >> /etc/redis/sentinel.conf
+                    echo "sentinel failover-timeout redis-server 60000" >> /etc/redis/sentinel.conf
+                    echo "sentinel parallel-syncs redis-server 1" >> /etc/redis/sentinel.conf
+
+                    echo ""
+                    echo "cat /etc/redis/sentinel.conf"
+                    cat /etc/redis/sentinel.conf
+                    
+                    exit 0
+                  fi
+                fi
+              done
+
+              sleep 1
+            done
+
+        volumeMounts:
+        - name: redis-server-config
+          mountPath: /etc/redis/
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      #                            CONTAINERS
+      # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+      containers:
+      - name: redis-sentinel
+        image: redis:6.0.9-alpine
+        command: ["redis-sentinel", "/etc/redis/sentinel.conf"]
+        # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+        #                            Ports
+        # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+        ports:
+        - containerPort: 5000
+          name: sentinel
+        # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+        #                            Probes
+        # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+        livenessProbe:
+          initialDelaySeconds: 1
+          periodSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+          timeoutSeconds: 2
+          tcpSocket:
+            port: sentinel
+        # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+        #                           Volume Mounts
+        # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+        volumeMounts:
+        - name: redis-server-config
+          mountPath: /etc/redis/
+        - name: data
+          mountPath: /data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinel
+spec:
+  clusterIP: None
+  ports:
+  - port: 5000
+    targetPort: 5000
+    name: sentinel
+  selector:
+    app: sentinel

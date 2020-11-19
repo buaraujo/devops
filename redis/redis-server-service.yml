@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-server-headless
+  labels:
+    app.bkraujo.io/name: redis
+    app.bkraujo.io/instance: server
+    app.bkraujo.io/part-of: <aplicacao>
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: server
+      port: 6379
+      protocol: TCP
+      targetPort: redis
+  selector:
+    app.bkraujo.io/name: redis
+    app.bkraujo.io/instance: server
+    app.bkraujo.io/part-of: <aplicacao>
